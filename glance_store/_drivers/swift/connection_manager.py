@@ -24,6 +24,7 @@ from oslo_utils import encodeutils
 from glance_store import exceptions
 from glance_store.i18n import _
 from glance_store.i18n import _LI
+from glance import db as glance_db
 
 LOG = logging.getLogger(__name__)
 
@@ -179,8 +180,13 @@ class MultiTenantConnectionManager(SwiftConnectionManager):
             reason = _("Multi-tenant Swift storage requires a user context.")
             raise exceptions.BadStoreConfiguration(store_name="swift",
                                                    reason=reason)
+
+        api = glance_db.get_api()
+        self.image = api.image_get(context,store_location.obj)
+
         super(MultiTenantConnectionManager, self).__init__(
             store, store_location, context, allow_reauth)
+
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._client and self.client.trust_id:
@@ -190,7 +196,12 @@ class MultiTenantConnectionManager(SwiftConnectionManager):
 
     def _get_storage_url(self):
         try:
-            return self.store._get_endpoint(self.context)
+            storage_url = self.store._get_endpoint(self.context)
+            if self.image:
+                storage_url = storage_url.replace(self.context.tenant,self.image['owner'])
+
+            return storage_url
+
         except (exceptions.BadStoreConfiguration,
                 ks_exceptions.EndpointNotFound) as e:
             LOG.debug("Cannot obtain endpoint from context: %s. Use location "
