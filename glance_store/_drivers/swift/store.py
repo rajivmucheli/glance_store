@@ -16,6 +16,7 @@
 """Storage backend for SWIFT"""
 
 import hashlib
+import json
 import logging
 import math
 
@@ -32,8 +33,12 @@ from six.moves import http_client
 from six.moves import urllib
 try:
     import swiftclient
+    from swiftclient.service import SwiftService
+    from swiftclient.service import SwiftError
+    from swiftclient.service import SwiftUploadObject
 except ImportError:
     swiftclient = None
+
 
 import glance_store
 from glance_store._drivers.swift import buffered
@@ -51,6 +56,7 @@ LOG = logging.getLogger(__name__)
 DEFAULT_CONTAINER = 'glance'
 DEFAULT_LARGE_OBJECT_SIZE = 5 * units.Ki  # 5GB
 DEFAULT_LARGE_OBJECT_CHUNK_SIZE = 200  # 200M
+DEFAULT_POOL_OF_THREADS = 10                # 10 pools
 ONE_MB = units.k * units.Ki  # Here we used the mixed meaning of MB
 
 _SWIFT_OPTS = [
@@ -243,6 +249,7 @@ Possible values:
 
 Related options:
     * ``swift_store_large_object_chunk_size``
+    * ``swift_store_pool_of_threads``
 
 """),
     cfg.IntOpt('swift_store_large_object_chunk_size',
@@ -266,7 +273,22 @@ Possible values:
 
 Related options:
     * ``swift_store_large_object_size``
+    * ``swift_store_pool_of_threads``
 
+"""),
+    cfg.IntOpt('swift_store_pool_of_threads',
+               default=DEFAULT_POOL_OF_THREADS,
+               help="""
+The number of thread pools to perform a multipart upload in Swift.
+This configuration option takes the number of thread pools when performing a
+Multipart Upload.
+
+Possible values:
+    * Any positive integer value
+
+Related Options:
+    * ``swift_store_large_object_size``
+    * ``swift_store_large_object_chunk_size``
 """),
     cfg.BoolOpt('swift_store_create_container_on_put', default=False,
                 help="""
@@ -799,6 +821,15 @@ class BaseStore(driver.Store):
         self.large_object_size = _obj_size * ONE_MB
         _chunk_size = self._option_get('swift_store_large_object_chunk_size')
         self.large_object_chunk_size = _chunk_size * ONE_MB
+        self.swift_store_pool_of_threads = self._option_get('swift_store_pool_of_threads')
+        if self.swift_store_pool_of_threads <= 0:
+            msg = _(
+                "swift_store_pool_of_threads must be a positive integer. %s"
+            ) % self.swift_store_pool_of_threads
+            LOG.error(msg)
+            raise exceptions.BadStoreConfiguration(
+                store_name="swift", reason=msg
+            )
         self.admin_tenants = glance_conf.swift_store_admin_tenants
         self.region = glance_conf.swift_store_region
         self.service_type = glance_conf.swift_store_service_type
@@ -931,126 +962,71 @@ class BaseStore(driver.Store):
         :raises: `glance_store.exceptions.Duplicate` if something already
                 exists at this location
         """
-        os_hash_value = hashlib.new(str(hashing_algo))
         location = self.create_location(image_id, context=context)
-        # initialize a manager with re-auth if image need to be splitted
-        need_chunks = (image_size == 0) or (
-            image_size >= self.large_object_size)
-        with self.get_manager(location, context,
-                              allow_reauth=need_chunks) as manager:
-
-            self._create_container_if_missing(location.container,
-                                              manager.get_connection())
-
-            LOG.debug("Adding image object '%(obj_name)s' "
-                      "to Swift" % dict(obj_name=location.obj))
+        options = {
+            'auth_url': location.swift_url,
+            'auth_token': context.auth_token,
+            'insecure': self.insecure,
+            'ssl_compression': self.ssl_compression,
+            'os_cacert': self.cacert,
+            'segment_size': self.large_object_chunk_size,
+            'segment_container': location.container,
+            'object_threads': self.swift_store_pool_of_threads,
+            'object_uu_threads': self.swift_store_pool_of_threads,
+            'use_slo': True,
+            'fail_fast': True,
+        }
+        with SwiftService(options=options) as swift:
             try:
-                if not need_chunks:
-                    # Image size is known, and is less than large_object_size.
-                    # Send to Swift with regular PUT.
-                    checksum = hashlib.md5()
-                    reader = ChunkReader(image_file, checksum,
-                                         os_hash_value, image_size,
-                                         verifier=verifier)
-                    obj_etag = manager.get_connection().put_object(
-                        location.container, location.obj,
-                        reader, content_length=image_size)
-                else:
-                    # Write the image into Swift in chunks.
-                    chunk_id = 1
-                    if image_size > 0:
-                        total_chunks = str(int(
-                            math.ceil(float(image_size) /
-                                      float(self.large_object_chunk_size))))
-                    else:
-                        # image_size == 0 is when we don't know the size
-                        # of the image. This can occur with older clients
-                        # that don't inspect the payload size.
-                        LOG.debug("Cannot determine image size because it is "
-                                  "either not provided in the request or "
-                                  "chunked-transfer encoding is used. "
-                                  "Adding image as a segmented object to "
-                                  "Swift.")
-                        total_chunks = '?'
-
-                    checksum = hashlib.md5()
-                    written_chunks = []
-                    combined_chunks_size = 0
-                    while True:
-                        chunk_size = self.large_object_chunk_size
-                        if image_size == 0:
-                            content_length = None
+                objs = [
+                    SwiftUploadObject(image_file, object_name=image_id)
+                ]
+                obj_etag = None
+                multihash = None
+                for r in swift.upload(location.container, objs):
+                    if r['success']:
+                        if 'attempts' in r and r['attempts'] > 1:
+                            if 'object' in r:
+                                LOG.debug(_('%s [after %d attempts]') % (
+                                    r['object'], r['attempts'])
+                                )
                         else:
-                            left = image_size - combined_chunks_size
-                            if left == 0:
-                                break
-                            if chunk_size > left:
-                                chunk_size = left
-                            content_length = chunk_size
+                            if 'object' in r:
+                                LOG.debug(r['object'])
+                                obj_etag = r['manifest_response_dict']['headers']['etag']
+                                obj_etag = json.loads(obj_etag)
+                            elif 'for_object' in r:
+                                LOG.debug(_('%s segment %s') % (
+                                    r['for_object'], r['segment_index'])
+                                )
+                                multihash = r['segment_etag']
 
-                        chunk_name = "%s-%05d" % (location.obj, chunk_id)
-
-                        with self.reader_class(
-                                image_file, checksum, os_hash_value,
-                                chunk_size, verifier,
-                                backend_group=self.backend_group) as reader:
-                            if reader.is_zero_size is True:
-                                LOG.debug('Not writing zero-length chunk.')
-                                break
-
-                            try:
-                                chunk_etag = \
-                                    manager.get_connection().put_object(
-                                        location.container,
-                                        chunk_name, reader,
-                                        content_length=content_length)
-                                written_chunks.append(chunk_name)
-                            except Exception:
-                                # Delete orphaned segments from swift backend
-                                with excutils.save_and_reraise_exception():
-                                    LOG.error(_("Error during chunked upload "
-                                                "to backend, deleting stale "
-                                                "chunks."))
-                                    self._delete_stale_chunks(
-                                        manager.get_connection(),
-                                        location.container,
-                                        written_chunks)
-
-                            bytes_read = reader.bytes_read
-                            msg = ("Wrote chunk %(chunk_name)s (%(chunk_id)d/"
-                                   "%(total_chunks)s) of length %(bytes_read)"
-                                   "d to Swift returning MD5 of content: "
-                                   "%(chunk_etag)s" %
-                                   {'chunk_name': chunk_name,
-                                    'chunk_id': chunk_id,
-                                    'total_chunks': total_chunks,
-                                    'bytes_read': bytes_read,
-                                    'chunk_etag': chunk_etag})
-                            LOG.debug(msg)
-
-                        chunk_id += 1
-                        combined_chunks_size += bytes_read
-                    # In the case we have been given an unknown image size,
-                    # set the size to the total size of the combined chunks.
-                    if image_size == 0:
-                        image_size = combined_chunks_size
-
-                    # Now we write the object manifest in X-Object-Manifest
-                    # header as defined for Dynamic Large Objects (DLO) Mode.
-                    # This request does not include ETag as PUT request has not
-                    # actual content that we need to verify.
-                    manifest = "%s/%s-" % (location.container, location.obj)
-                    headers = {'X-Object-Manifest': manifest}
-
-                    # The ETag returned for the manifest is actually the
-                    # MD5 hash of the concatenated checksums of the strings
-                    # of each chunk...so we ignore this result in favour of
-                    # the MD5 of the entire image file contents, so that
-                    # users can verify the image file contents accordingly
-                    manager.get_connection().put_object(location.container,
-                                                        location.obj,
-                                                        None, headers=headers)
-                    obj_etag = checksum.hexdigest()
+                    else:
+                        error = r['error']
+                        if 'action' in r and r['action'] == "create_container":
+                            # it is not an error to be unable to create the
+                            # container so print a warning and carry on
+                            if isinstance(error, swiftclient.ClientException):
+                                if (r['headers'] and
+                                        'X-Storage-Policy' in r['headers']):
+                                    msg = ' with Storage Policy %s' % \
+                                          r['headers']['X-Storage-Policy'].strip()
+                                else:
+                                    msg = ' '.join(str(x) for x in (
+                                        error.http_status, error.http_reason)
+                                    )
+                                    if error.http_response_content:
+                                        if msg:
+                                            msg += ': '
+                                        msg += (error.http_response_content
+                                                .decode('utf8')[:60])
+                                    msg = ': %s' % msg
+                            else:
+                                msg = ': %s' % error
+                            LOG.warning(
+                                'Warning: failed to create container '
+                                "'%s'%s", r['container'], msg
+                            )
 
                 # NOTE: We return the user and key here! Have to because
                 # location is used by the API server to return the actual
@@ -1066,18 +1042,17 @@ class BaseStore(driver.Store):
                 metadata = {}
                 if self.backend_group:
                     metadata['store'] = u"%s" % self.backend_group
-
-                return (location.get_uri(credentials_included=include_creds),
-                        image_size, obj_etag, os_hash_value.hexdigest(),
-                        metadata)
-            except swiftclient.ClientException as e:
-                if e.http_status == http_client.CONFLICT:
-                    msg = _("Swift already has an image at this location")
-                    raise exceptions.Duplicate(message=msg)
-
+                return (
+                    location.get_uri(credentials_included=include_creds),
+                    image_size,
+                    obj_etag,
+                    multihash,
+                    metadata,
+                )
+            except SwiftError as e:
                 msg = (_(u"Failed to add object to Swift.\n"
                          "Got error from Swift: %s.")
-                       % encodeutils.exception_to_unicode(e))
+                       % encodeutils.exception_to_unicode(e.value))
                 LOG.error(msg)
                 raise glance_store.BackendException(msg)
 
