@@ -16,8 +16,6 @@
 """Storage backend for SWIFT"""
 
 import hashlib
-import logging
-import math
 
 from concurrent import futures
 from keystoneauth1.access import service_catalog as keystone_sc
@@ -25,6 +23,7 @@ from keystoneauth1 import identity as ks_identity
 from keystoneauth1 import session as ks_session
 from keystoneclient.v3 import client as ks_client
 from oslo_config import cfg
+from oslo_log import log as logging
 from oslo_utils import encodeutils
 from oslo_utils import excutils
 from oslo_utils import units
@@ -509,14 +508,14 @@ class UploadPart(object):
         self.success = True
 
 
-def run_upload(manager, location, part):
-
+def run_upload(manager, location, part, context):
     pnum = part.partnum
     bsize = part.chunks
     chunk_name = "%s-%05d" % (location.obj, pnum)
     LOG.debug("Uploading upload part in Swift partnum=%(pnum)d, "
               "size=%(bsize)d, key=%(chunk_name)s",
-              {'pnum': pnum, 'bsize': bsize, 'chunk_name': chunk_name})
+              {'pnum': pnum, 'bsize': bsize, 'chunk_name': chunk_name},
+              context=context)
     try:
         chunk_etag = \
             manager.get_connection().put_object(
@@ -527,7 +526,7 @@ def run_upload(manager, location, part):
         part.size = bsize
     except Exception:
         LOG.error(_("Error during chunked upload to backend, deleting stale "
-                    "chunks."))
+                    "chunks."), context=context)
         part.success = False
     finally:
         part.fp.close()
@@ -540,7 +539,7 @@ def run_upload(manager, location, part):
             'chunk_etag': chunk_etag
         }
     )
-    LOG.debug(msg)
+    LOG.debug(msg, context=context)
 
 
 def swift_retry_iter(resp_iter, length, store, location, manager):
@@ -1040,6 +1039,7 @@ class BaseStore(driver.Store):
                         manager,
                         location,
                         verifier,
+                        context,
                     )
                     success = True
                     for part in plist:
@@ -1110,7 +1110,7 @@ class BaseStore(driver.Store):
                 raise glance_store.BackendException(msg)
 
     def _upload_chunks(self, image_file, checksum, os_hash_value,
-                       manager, location, verifier):
+                       manager, location, verifier, context):
         chunk_id = 0
         total_size = 0
         plist = []
@@ -1129,7 +1129,7 @@ class BaseStore(driver.Store):
                 part_size = len(write_chunk)
                 part = UploadPart(fp, chunk_id + 1, part_size)
                 futs.append(executor.submit(
-                    run_upload, manager, location, part))
+                    run_upload, manager, location, part, context))
                 plist.append(part)
                 total_size += part_size
                 chunk_id += 1
