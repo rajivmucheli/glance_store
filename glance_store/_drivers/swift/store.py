@@ -34,6 +34,7 @@ try:
     import swiftclient
 except ImportError:
     swiftclient = None
+from time import sleep
 
 import glance_store
 from glance_store._drivers.swift import buffered
@@ -52,7 +53,8 @@ LOG = logging.getLogger(__name__)
 DEFAULT_CONTAINER = 'glance'
 DEFAULT_LARGE_OBJECT_SIZE = 5 * units.Ki  # 5GB
 DEFAULT_LARGE_OBJECT_CHUNK_SIZE = 200  # 200M
-DEFAULT_THREAD_POOL_SIZE = 1                # 1 thread
+DEFAULT_THREAD_POOL_SIZE = 1  # 1 thread
+DEFAULT_CONTAINER_DELETE_ATTEMPTS = 5  # how many times retry deletion
 ONE_MB = units.k * units.Ki  # Here we used the mixed meaning of MB
 
 _SWIFT_OPTS = [
@@ -1182,10 +1184,14 @@ class BaseStore(driver.Store):
                     try:
                         connection.delete_object(obj_container,
                                                  segment['name'])
-                    except swiftclient.ClientException:
-                        msg = _('Unable to delete segment %(segment_name)s')
-                        msg = msg % {'segment_name': segment['name']}
-                        LOG.exception(msg)
+                    except swiftclient.ClientException as e:
+                        if e.http_status == http_client.NOT_FOUND:
+                            # segement already deleted, that is OK.
+                            pass
+                        else:
+                            msg = _('Unable to delete segment %(seg_name)s')
+                            msg = msg % {'seg_name': segment['name']}
+                            LOG.exception(msg)
 
             # Delete object (or, in segmented case, the manifest)
             connection.delete_object(location.container, location.obj)
@@ -1566,7 +1572,20 @@ class MultiTenantStore(BaseStore):
             connection = self.get_connection(location.store_location,
                                              context=context)
         super(MultiTenantStore, self).delete(location, connection)
-        connection.delete_container(location.store_location.container)
+
+        delete_attempt = 0
+        while delete_attempt < DEFAULT_CONTAINER_DELETE_ATTEMPTS:
+            delete_attempt += 1
+            try:
+                connection.delete_container(location.store_location.container)
+                break
+            except swiftclient.ClientException as e:
+                if (e.http_status == http_client.CONFLICT and
+                        delete_attempt != DEFAULT_CONTAINER_DELETE_ATTEMPTS):
+                    # wait, as the image segments might still be removing
+                    sleep(0.2)
+                else:
+                    raise
 
     def set_acls(self, location, public=False, read_tenants=None,
                  write_tenants=None, connection=None, context=None):
