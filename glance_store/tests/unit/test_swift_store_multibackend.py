@@ -1131,14 +1131,15 @@ class SwiftTests(object):
             return None, [{'name': '%s-%03d' % (test_image_id, x)}
                           for x in range(1, 6)]
 
+        def fake_post_account(headers, query_string, data):
+            if query_string == 'bulk-delete':
+                global SWIFT_POST_ACCOUNT_CALLS
+                SWIFT_POST_ACCOUNT_CALLS += 1
+            return None, b'{}'
+
         def fake_delete_object(container, object_name):
-            # Simulate error on 1st and 3rd segments
             global SWIFT_DELETE_OBJECT_CALLS
             SWIFT_DELETE_OBJECT_CALLS += 1
-            if object_name.endswith('-001') or object_name.endswith('-003'):
-                raise swiftclient.ClientException('Object DELETE failed')
-            else:
-                pass
 
         conf = copy.deepcopy(SWIFT_CONF)
         self.config(group="swift1", **conf)
@@ -1155,13 +1156,20 @@ class SwiftTests(object):
         conn.delete_object = fake_delete_object
         conn.head_object = fake_head_object
         conn.get_container = fake_get_container
+        conn.post_account = fake_post_account
 
         global SWIFT_DELETE_OBJECT_CALLS
         SWIFT_DELETE_OBJECT_CALLS = 0
 
+        global SWIFT_POST_ACCOUNT_CALLS
+        SWIFT_POST_ACCOUNT_CALLS = 0
+
         self.store.delete(loc, connection=conn)
-        # Expecting 6 delete calls, 5 for the segments and 1 for the manifest
-        self.assertEqual(6, SWIFT_DELETE_OBJECT_CALLS)
+        # Expecting 1 delete call for the bulk delete image segments
+        # and 1 delete call for the manifest
+        ACTUAL_DELETE_CALLS = \
+            SWIFT_DELETE_OBJECT_CALLS + SWIFT_POST_ACCOUNT_CALLS
+        self.assertEqual(2, ACTUAL_DELETE_CALLS)
 
     def test_read_acl_public(self):
         """
