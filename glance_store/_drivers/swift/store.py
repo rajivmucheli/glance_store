@@ -524,6 +524,7 @@ class UploadPart(object):
         self.chunks = chunks
         self.etag = {}
         self.success = True
+        self.name = None
 
 
 def run_upload(manager, location, part, context):
@@ -542,6 +543,7 @@ def run_upload(manager, location, part, context):
                 content_length=bsize)
         part.etag[pnum] = chunk_etag
         part.size = bsize
+        part.name = chunk_name
     except Exception:
         LOG.error(_("Error during chunked upload to backend, deleting stale "
                     "chunks."), context=context)
