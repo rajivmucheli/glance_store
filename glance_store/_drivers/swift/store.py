@@ -446,6 +446,20 @@ Related Options:
     * None
 
 """),
+    cfg.IntOpt('swift_container_delete_timeout',
+               min=1,
+               default=1,
+               help="""
+Time in seconds defining the size of the window in which a new
+delete attempt may be requested.
+
+Possible values:
+    * Positive integer value
+
+Related Options:
+    * None
+
+"""),
     cfg.BoolOpt('swift_store_use_trusts',
                 default=True,
                 help="""
@@ -882,6 +896,8 @@ class BaseStore(driver.Store):
         self.region = glance_conf.swift_store_region
         self.service_type = glance_conf.swift_store_service_type
         self.conf_endpoint = glance_conf.swift_store_endpoint
+        self.container_delete_timeout = \
+            glance_conf.swift_container_delete_timeout
         self.endpoint_type = glance_conf.swift_store_endpoint_type
         self.insecure = glance_conf.swift_store_auth_insecure
         self.ssl_compression = glance_conf.swift_store_ssl_compression
@@ -1602,7 +1618,7 @@ class MultiTenantStore(BaseStore):
                 if (e.http_status == http_client.CONFLICT and
                         delete_attempt != DEFAULT_CONTAINER_DELETE_ATTEMPTS):
                     # wait, as the image segments might still be removing
-                    sleep(0.2)
+                    sleep(self.container_delete_timeout)
                 else:
                     raise
 
