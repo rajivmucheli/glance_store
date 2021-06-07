@@ -996,6 +996,17 @@ class BaseStore(driver.Store):
                                                    reason=reason)
         return result
 
+    def _delete_chunks_sequential(self, connection, container, chunk_list):
+        for chunk_name in chunk_list:
+            LOG.debug("Deleting chunk %s" % chunk_name)
+            try:
+                connection.delete_object(container, chunk_name)
+            except Exception:
+                msg = _("Failed to delete orphaned chunk "
+                        "%(container)s/%(chunk)s")
+                LOG.exception(msg % {'container': container,
+                                     'chunk': chunk_name})
+
     def _delete_chunks(self, connection, container, chunk_list):
         LOG.debug(
             "Deleting %(num_chunks)s chunks "
@@ -1032,10 +1043,14 @@ class BaseStore(driver.Store):
             msg = _('No content received on account POST. '
                     'Is the bulk operations middleware enabled?')
             LOG.exception(msg)
-        LOG.debug(
-            "Done bulk delete of chunks with response: %s" %
-            parse_api_response(headers, body)
-        )
+            LOG.debug("Try to delete chunks in a sequential way as a fallback.")
+            self._delete_chunks_sequential(connection, container, chunk_list)
+            LOG.debug("Done sequential delete of chunks.")
+        else:
+            LOG.debug(
+                "Done bulk delete of chunks with response: %s" %
+                parse_api_response(headers, body)
+            )
 
     @driver.back_compat_add
     @capabilities.check
