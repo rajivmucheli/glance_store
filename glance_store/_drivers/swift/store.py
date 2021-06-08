@@ -1632,8 +1632,11 @@ class MultiTenantStore(BaseStore):
                 connection.delete_container(location.store_location.container)
                 break
             except swiftclient.ClientException as e:
-                if (e.http_status == http_client.CONFLICT and
-                        delete_attempt != DEFAULT_CONTAINER_DELETE_ATTEMPTS):
+                if e.http_status == http_client.NOT_FOUND:
+                    # container is deleted, exit the loop
+                    break
+                elif (e.http_status == http_client.CONFLICT and
+                          delete_attempt != DEFAULT_CONTAINER_DELETE_ATTEMPTS):
                     # wait, as the image segments might still be removing
                     sleep(self.container_delete_timeout)
                 else:
