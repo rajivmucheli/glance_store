@@ -1300,9 +1300,9 @@ class SwiftTests(object):
         trustee_client = mock.MagicMock()
         trustee_client.session.get_user_id.return_value = 'fake_user'
         trustor_client = mock.MagicMock()
-        trustor_client.session.auth.get_auth_ref.return_value = {
-            'roles': [{'name': 'fake_role'}]
-        }
+        fake_auth_ref = mock.Mock()
+        fake_auth_ref.role_names = ['fake_role']
+        trustor_client.session.auth.get_auth_ref = fake_auth_ref
         trustor_client.trusts.create.return_value = mock.MagicMock(
             id='fake_trust')
         main_client = mock.MagicMock()
@@ -1341,7 +1341,7 @@ class SwiftTests(object):
         trustor_client.trusts.create.assert_called_once_with(
             trustee_user='fake_user', trustor_user=ctxt.user_id,
             project=ctxt.project_id, impersonation=True,
-            role_names=['fake_role']
+            role_names=fake_auth_ref().role_names
         )
         mock_identity.V3Password.assert_any_call(
             auth_url=default_swift_reference.get('auth_address'),
