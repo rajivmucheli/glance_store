@@ -40,6 +40,7 @@ mox3==0.25.0
 msgpack==0.5.6
 netaddr==0.7.19
 netifaces==0.10.6
+oslo.log==4.4.0
 os-brick==2.6.0
 os-client-config==1.29.0
 os-win==4.0.1
@@ -47,7 +48,6 @@ oslo.concurrency==3.26.0
 oslo.config==5.2.0
 oslo.context==2.22.0
 oslo.i18n==3.15.3
-oslo.log==3.36.0
 oslo.privsep==1.23.0
 oslo.rootwrap==5.8.0
 oslo.serialization==2.18.0
@@ -85,3 +85,4 @@ unittest2==1.1.0
 urllib3==1.22
 voluptuous==0.11.1
 wrapt==1.10.11
+
