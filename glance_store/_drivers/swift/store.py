@@ -1110,10 +1110,10 @@ class BaseStore(driver.Store):
                             LOG.error(_("Error during chunked upload "
                                         "to backend, deleting stale "
                                         "chunks."))
-                            self._delete_stale_chunks(
+                            chunk_names = [chunk.name for chunk in plist]
+                            self._delete_chunks(
                                 manager.get_connection(),
                                 location.container,
-                                plist,
                                 chunk_names)
 
                     # In the case we have been given an unknown image size,
